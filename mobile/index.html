@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#2d5be3" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="SM Coach" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+  <title>Sports Manager · Coach Mobile</title>
+</head>
+<body>
+  <div id="root"></div>
+  <script>
+    // Bridge legacy /setup?params URLs (no hash) into HashRouter's /#/setup?params
+    // form. Without this, scanning a QR like "https://host/setup?url=...&anon=..."
+    // lands on the default route because HashRouter only reads the fragment.
+    (function () {
+      var p = window.location.pathname;
+      var s = window.location.search;
+      if (p !== '/' && !window.location.hash) {
+        window.history.replaceState(null, '', '/#' + p + s);
+      }
+    })();
+  </script>
+  <script type="module" src="/src/main.jsx"></script>
+</body>
+</html>

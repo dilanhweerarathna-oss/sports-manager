@@ -1,0 +1,939 @@
+from __future__ import annotations
+from datetime import date
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+    QTreeWidget, QTreeWidgetItem, QHeaderView, QDialog,
+    QDialogButtonBox, QFormLayout, QComboBox, QSpinBox,
+    QLabel, QMessageBox, QAbstractItemView, QLineEdit,
+    QFrame, QTabWidget
+)
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QColor, QBrush
+from services.payment_service import PaymentService
+from services.receipt_service import ReceiptService
+from services.sport_service import SportService
+from services.auth_service import AuthService
+from repositories.student_repository import StudentRepository
+from utils.logger import get_logger
+
+logger = get_logger("payments_page")
+
+_MONTHS = ["January","February","March","April","May","June",
+           "July","August","September","October","November","December"]
+
+# Column indices for child (payment) rows
+_COL_CHECK  = 0
+_COL_SPORT  = 1
+_COL_AMOUNT = 2
+_COL_STATUS = 3
+_COL_DATE   = 4
+
+
+class PaymentsPage(QWidget):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._svc = PaymentService()
+        self._receipt_svc = ReceiptService()
+        self._sport_svc = SportService()
+        self._all_rows: list[dict] = []
+        self._reg_rows: list[dict] = []
+        self._collect_rows: list[dict] = []
+        self._collect_student = None
+        self._student_repo = StudentRepository()
+        self._is_viewer = AuthService.instance().is_viewer
+        self._setup_ui()
+        # Auto-generate monthly & registration payments for the current month on first load.
+        # Uses a 0ms timer so the UI is fully rendered before the DB work runs.
+        QTimer.singleShot(0, self._auto_generate_on_startup)
+
+    def _setup_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 16, 24, 16)
+        layout.setSpacing(12)
+
+        self._tabs = QTabWidget()
+        if not self._is_viewer:
+            self._tabs.addTab(self._build_collect_tab(), "💳 Collect Payment")
+        self._tabs.addTab(self._build_monthly_tab(), "Monthly Fees")
+        self._tabs.addTab(self._build_registration_tab(), "Registration Fees")
+        layout.addWidget(self._tabs)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Monthly tab
+    # ═══════════════════════════════════════════════════════════════════════
+
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Collect Payment tab
+    # ═══════════════════════════════════════════════════════════════════════
+
+    def _build_collect_tab(self) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(0, 8, 0, 0)
+        layout.setSpacing(8)
+
+        search_card = QFrame()
+        search_card.setFrameShape(QFrame.Shape.StyledPanel)
+        sc_layout = QVBoxLayout(search_card)
+        sc_layout.setContentsMargins(14, 12, 14, 12)
+        sc_layout.setSpacing(8)
+        sc_layout.addWidget(QLabel("Search student by name or admission number:"))
+        self._collect_search = QLineEdit()
+        self._collect_search.setPlaceholderText("Start typing…")
+        self._collect_search.setMinimumHeight(34)
+        self._collect_search.textChanged.connect(self._collect_search_changed)
+        sc_layout.addWidget(self._collect_search)
+
+        self._collect_results = QTreeWidget()
+        self._collect_results.setColumnCount(3)
+        self._collect_results.setHeaderLabels(["Student", "Admission No", "Pending"])
+        self._collect_results.setRootIsDecorated(False)
+        self._collect_results.setMaximumHeight(160)
+        self._collect_results.setVisible(False)
+        self._collect_results.itemClicked.connect(self._collect_pick_student)
+        self._collect_results.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self._collect_results.setColumnWidth(1, 120)
+        self._collect_results.setColumnWidth(2, 80)
+        sc_layout.addWidget(self._collect_results)
+        layout.addWidget(search_card)
+
+        self._collect_stu_card = QFrame()
+        self._collect_stu_card.setFrameShape(QFrame.Shape.StyledPanel)
+        stu_row = QHBoxLayout(self._collect_stu_card)
+        stu_row.setContentsMargins(14, 10, 14, 10)
+        self._collect_stu_lbl = QLabel()
+        self._collect_stu_lbl.setStyleSheet("font-weight: bold; font-size: 13px;")
+        stu_row.addWidget(self._collect_stu_lbl)
+        stu_row.addStretch()
+        change_btn = QPushButton("Change student")
+        change_btn.setObjectName("secondaryBtn")
+        change_btn.clicked.connect(self._collect_clear)
+        stu_row.addWidget(change_btn)
+        self._collect_stu_card.setVisible(False)
+        layout.addWidget(self._collect_stu_card)
+
+        self._collect_pay_card = QFrame()
+        self._collect_pay_card.setFrameShape(QFrame.Shape.StyledPanel)
+        pay_layout = QVBoxLayout(self._collect_pay_card)
+        pay_layout.setContentsMargins(0, 0, 0, 0)
+        pay_layout.setSpacing(0)
+
+        pay_hdr = QHBoxLayout()
+        pay_hdr.setContentsMargins(14, 10, 14, 8)
+        pay_hdr.addWidget(QLabel("Pending payments"))
+        pay_hdr.addStretch()
+        sel_all_btn = QPushButton("Select all")
+        sel_all_btn.clicked.connect(self._collect_select_all)
+        clr_all_btn = QPushButton("Clear")
+        clr_all_btn.setObjectName("secondaryBtn")
+        clr_all_btn.clicked.connect(self._collect_clear_all)
+        pay_hdr.addWidget(sel_all_btn)
+        pay_hdr.addWidget(clr_all_btn)
+        pay_layout.addLayout(pay_hdr)
+
+        self._collect_tree = QTreeWidget()
+        self._collect_tree.setColumnCount(4)
+        self._collect_tree.setHeaderLabels(["", "Sport", "Period / Type", "Amount"])
+        self._collect_tree.setColumnWidth(0, 30)
+        self._collect_tree.setColumnWidth(2, 160)
+        self._collect_tree.setColumnWidth(3, 100)
+        self._collect_tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self._collect_tree.setRootIsDecorated(False)
+        self._collect_tree.setAlternatingRowColors(True)
+        self._collect_tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._collect_tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self._collect_tree.itemClicked.connect(self._collect_toggle)
+        pay_layout.addWidget(self._collect_tree)
+        self._collect_pay_card.setVisible(False)
+        layout.addWidget(self._collect_pay_card, 1)  # stretch=1: expands when visible, excluded when hidden
+
+        self._collect_footer = QFrame()
+        self._collect_footer.setFrameShape(QFrame.Shape.StyledPanel)
+        ftr_layout = QVBoxLayout(self._collect_footer)
+        ftr_layout.setContentsMargins(14, 12, 14, 12)
+        ftr_layout.setSpacing(10)
+
+        total_row = QHBoxLayout()
+        self._collect_count_lbl = QLabel("0 items selected")
+        self._collect_count_lbl.setStyleSheet("color: gray; font-size: 12px;")
+        self._collect_total_lbl = QLabel("LKR 0.00")
+        self._collect_total_lbl.setStyleSheet("font-size: 18px; font-weight: bold; color: #BA7517;")
+        self._collect_total_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
+        total_row.addWidget(self._collect_count_lbl)
+        total_row.addStretch()
+        total_row.addWidget(self._collect_total_lbl)
+        ftr_layout.addLayout(total_row)
+
+        method_row = QHBoxLayout()
+        method_row.addWidget(QLabel("Payment method:"))
+        self._collect_method = QComboBox()
+        self._collect_method.addItems(["Cash", "Card", "Bank Transfer"])
+        method_row.addWidget(self._collect_method)
+        method_row.addStretch()
+        ftr_layout.addLayout(method_row)
+
+        self._collect_btn = QPushButton("Collect & Generate Receipt")
+        self._collect_btn.setMinimumHeight(38)
+        self._collect_btn.setEnabled(False)
+        self._collect_btn.clicked.connect(self._do_collect)
+        self._collect_btn.setStyleSheet(
+            "QPushButton { background: #BA7517; color: white; font-weight: bold; "
+            "font-size: 13px; border-radius: 6px; border: none; } "
+            "QPushButton:hover { background: #854F0B; } "
+            "QPushButton:disabled { background: #cccccc; color: #888888; }"
+        )
+        ftr_layout.addWidget(self._collect_btn)
+        self._collect_footer.setVisible(False)
+        layout.addWidget(self._collect_footer)
+        layout.addStretch(0)  # anchor all content to top when cards are hidden
+
+        return w
+
+    def _collect_search_changed(self, text: str) -> None:
+        q = text.strip().lower()
+        self._collect_results.clear()
+        if not q:
+            self._collect_results.setVisible(False)
+            return
+        try:
+            students = self._student_repo.get_all()
+            matches = [s for s in students
+                       if q in (s.full_name or "").lower()
+                       or q in (s.admission_no or "").lower()]
+            if not matches:
+                self._collect_results.setVisible(False)
+                return
+            if len(matches) == 1:
+                self._select_student(matches[0])
+                return
+            for s in matches[:12]:
+                pending = self._svc.get_all_pending_by_student(s.id)
+                item = QTreeWidgetItem(self._collect_results)
+                item.setText(0, s.full_name or "")
+                item.setText(1, s.admission_no or "")
+                item.setText(2, str(len(pending)))
+                item.setData(0, Qt.ItemDataRole.UserRole, s.id)
+            self._collect_results.setVisible(True)
+        except Exception as e:
+            logger.error(f"Collect search: {e}")
+
+    def _select_student(self, student) -> None:
+        self._collect_student = student
+        self._collect_results.setVisible(False)
+        self._collect_search.blockSignals(True)
+        self._collect_search.setText(student.full_name or "")
+        self._collect_search.blockSignals(False)
+        self._collect_stu_lbl.setText(
+            f"{student.full_name}   ·   Adm: {student.admission_no}"
+        )
+        self._collect_stu_card.setVisible(True)
+        self._collect_rows = self._svc.get_all_pending_by_student(student.id)
+        self._collect_populate()
+        self._collect_pay_card.setVisible(True)
+        self._collect_footer.setVisible(True)
+
+    def _collect_pick_student(self, item: QTreeWidgetItem, _col: int) -> None:
+        student_id = item.data(0, Qt.ItemDataRole.UserRole)
+        try:
+            students = self._student_repo.get_all()
+            student = next((s for s in students if s.id == student_id), None)
+            if not student:
+                return
+            self._select_student(student)
+        except Exception as e:
+            logger.error(f"Collect pick: {e}")
+
+    def _collect_populate(self) -> None:
+        self._collect_tree.clear()
+        today = date.today()
+        regs = [r for r in self._collect_rows if r["payment"].payment_type == "registration"]
+        mnth = [r for r in self._collect_rows if r["payment"].payment_type == "monthly"]
+        red = QBrush(QColor("#c0392b"))
+        amber = QBrush(QColor("#BA7517"))
+
+        def _add_group(label: str, rows: list) -> None:
+            if not rows:
+                return
+            grp = QTreeWidgetItem(self._collect_tree)
+            grp.setText(1, label)
+            grp.setFlags(grp.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
+            font = grp.font(1)
+            font.setBold(True)
+            grp.setFont(1, font)
+            for r in rows:
+                p = r["payment"]
+                is_overdue = (
+                    p.payment_type == "monthly" and (
+                        p.payment_year < today.year or
+                        (p.payment_year == today.year and p.payment_month < today.month)
+                    )
+                )
+                row = QTreeWidgetItem(self._collect_tree)
+                row.setCheckState(0, Qt.CheckState.Checked)
+                row.setText(1, r["sport_name"])
+                period = r["label"] + ("  ⚠ Overdue" if is_overdue else "")
+                row.setText(2, period)
+                row.setText(3, f"{p.amount:,.2f}")
+                row.setData(0, Qt.ItemDataRole.UserRole, p.id)
+                if is_overdue:
+                    row.setForeground(2, red)
+                if p.payment_type == "registration":
+                    row.setForeground(2, amber)
+
+        _add_group("Registration Fees", regs)
+        _add_group("Monthly Fees", mnth)
+        self._collect_update_footer()
+
+    def _collect_toggle(self, item: QTreeWidgetItem, col: int) -> None:
+        if item.data(0, Qt.ItemDataRole.UserRole) is None:
+            return
+        if col != 0:
+            cur = item.checkState(0)
+            item.setCheckState(
+                0,
+                Qt.CheckState.Unchecked if cur == Qt.CheckState.Checked
+                else Qt.CheckState.Checked,
+            )
+        self._collect_update_footer()
+
+    def _collect_checked_ids(self) -> list:
+        ids = []
+        root = self._collect_tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            it = root.child(i)
+            if it.data(0, Qt.ItemDataRole.UserRole) is not None and \
+               it.checkState(0) == Qt.CheckState.Checked:
+                ids.append(it.data(0, Qt.ItemDataRole.UserRole))
+        return ids
+
+    def _collect_select_all(self) -> None:
+        root = self._collect_tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            it = root.child(i)
+            if it.data(0, Qt.ItemDataRole.UserRole) is not None:
+                it.setCheckState(0, Qt.CheckState.Checked)
+        self._collect_update_footer()
+
+    def _collect_clear_all(self) -> None:
+        root = self._collect_tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            it = root.child(i)
+            if it.data(0, Qt.ItemDataRole.UserRole) is not None:
+                it.setCheckState(0, Qt.CheckState.Unchecked)
+        self._collect_update_footer()
+
+    def _collect_update_footer(self) -> None:
+        ids = set(self._collect_checked_ids())
+        selected = [r for r in self._collect_rows if r["payment"].id in ids]
+        total = sum(r["payment"].amount for r in selected)
+        n = len(selected)
+        self._collect_count_lbl.setText(f"{n} item{'s' if n != 1 else ''} selected")
+        self._collect_total_lbl.setText(f"LKR {total:,.2f}")
+        self._collect_btn.setEnabled(n > 0)
+
+    def _collect_clear(self) -> None:
+        self._collect_student = None
+        self._collect_rows = []
+        self._collect_search.clear()
+        self._collect_results.clear()
+        self._collect_results.setVisible(False)
+        self._collect_stu_card.setVisible(False)
+        self._collect_pay_card.setVisible(False)
+        self._collect_footer.setVisible(False)
+
+    def _do_collect(self) -> None:
+        ids = self._collect_checked_ids()
+        if not ids or not self._collect_student:
+            return
+        method_map = {"Cash": "cash", "Card": "card", "Bank Transfer": "bank"}
+        method = method_map.get(self._collect_method.currentText(), "cash")
+        try:
+            receipt = self._receipt_svc.create(self._collect_student.id, ids, method)
+            self._svc.mark_paid(ids)
+            QMessageBox.information(
+                self, "Receipt Generated",
+                f"Receipt {receipt.receipt_no} created successfully.\n"
+                f"{len(ids)} payment(s) collected via {self._collect_method.currentText()}."
+            )
+            self._collect_clear()
+            self._load()
+            self._load_registrations()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+
+
+    def _build_monthly_tab(self) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(0, 8, 0, 0)
+        layout.setSpacing(12)
+
+        # Search bar
+        search_bar = QHBoxLayout()
+        search_bar.setSpacing(10)
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Search by student name or admission no...")
+        self._search.setMinimumWidth(280)
+        self._search.textChanged.connect(self._apply_search)
+        search_bar.addWidget(self._search)
+        search_bar.addStretch()
+        layout.addLayout(search_bar)
+
+        # Filter bar
+        filter_bar = QHBoxLayout()
+        filter_bar.setSpacing(10)
+
+        filter_bar.addWidget(QLabel("Month:"))
+        self._month_combo = QComboBox()
+        for m in _MONTHS:
+            self._month_combo.addItem(m)
+        self._month_combo.setCurrentIndex(date.today().month - 1)
+        filter_bar.addWidget(self._month_combo)
+
+        filter_bar.addWidget(QLabel("Year:"))
+        self._year_spin = QSpinBox()
+        self._year_spin.setRange(2020, 2099)
+        self._year_spin.setValue(date.today().year)
+        filter_bar.addWidget(self._year_spin)
+
+        filter_bar.addWidget(QLabel("Status:"))
+        self._status_filter = QComboBox()
+        self._status_filter.addItems(["All", "Paid", "Unpaid"])
+        filter_bar.addWidget(self._status_filter)
+
+        filter_bar.addWidget(QLabel("Sport:"))
+        self._sport_filter = QComboBox()
+        self._sport_filter.addItem("All", 0)
+        try:
+            for s in self._sport_svc.get_all():
+                self._sport_filter.addItem(s.sport_name, s.id)
+        except Exception:
+            pass
+        filter_bar.addWidget(self._sport_filter)
+
+        load_btn = QPushButton("Load")
+        load_btn.clicked.connect(self._load)
+        filter_bar.addWidget(load_btn)
+        filter_bar.addStretch()
+        layout.addLayout(filter_bar)
+
+        # Toolbar
+        toolbar = QHBoxLayout()
+        if not self._is_viewer:
+            for label, slot, obj in [
+                ("✅ Mark Paid", self._mark_paid, ""),
+                ("⬜ Mark Unpaid", self._mark_unpaid, "secondaryBtn"),
+                ("🧾 Create Receipt", self._create_receipt, ""),
+            ]:
+                btn = QPushButton(label)
+                if obj:
+                    btn.setObjectName(obj)
+                btn.clicked.connect(slot)
+                toolbar.addWidget(btn)
+        toolbar.addStretch()
+
+        # Auto-generate status — shown briefly after silent generation
+        self._autogen_lbl = QLabel()
+        self._autogen_lbl.setStyleSheet("color: #27ae60; font-size: 11px;")
+        self._autogen_lbl.setVisible(False)
+        toolbar.addWidget(self._autogen_lbl)
+
+        self._stats_lbl = QLabel()
+        toolbar.addWidget(self._stats_lbl)
+        layout.addLayout(toolbar)
+
+        # Tree
+        self._tree = QTreeWidget()
+        self._tree.setColumnCount(5)
+        self._tree.setHeaderLabels(["✓", "Sport / Student", "Amount", "Status", "Date Paid"])
+        self._tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self._tree.setColumnWidth(_COL_CHECK, 30)
+        self._tree.setColumnWidth(_COL_AMOUNT, 90)
+        self._tree.setColumnWidth(_COL_STATUS, 80)
+        self._tree.setColumnWidth(_COL_DATE, 110)
+        self._tree.setAlternatingRowColors(True)
+        self._tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        if not self._is_viewer:
+            self._tree.itemClicked.connect(self._on_item_clicked)
+        layout.addWidget(self._tree)
+
+        return w
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Registration tab
+    # ═══════════════════════════════════════════════════════════════════════
+
+    def _build_registration_tab(self) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(0, 8, 0, 0)
+        layout.setSpacing(12)
+
+        # Search bar
+        search_bar = QHBoxLayout()
+        self._reg_search = QLineEdit()
+        self._reg_search.setPlaceholderText("Search by student name or admission no...")
+        self._reg_search.setMinimumWidth(280)
+        self._reg_search.textChanged.connect(self._apply_reg_search)
+        search_bar.addWidget(self._reg_search)
+        search_bar.addStretch()
+        layout.addLayout(search_bar)
+
+        # Filter bar
+        filter_bar = QHBoxLayout()
+        filter_bar.setSpacing(10)
+        filter_bar.addWidget(QLabel("Status:"))
+        self._reg_status_filter = QComboBox()
+        self._reg_status_filter.addItems(["All", "Paid", "Unpaid"])
+        filter_bar.addWidget(self._reg_status_filter)
+
+        reg_load_btn = QPushButton("Load")
+        reg_load_btn.clicked.connect(self._load_registrations)
+        filter_bar.addWidget(reg_load_btn)
+        filter_bar.addStretch()
+        layout.addLayout(filter_bar)
+
+        # Toolbar
+        toolbar = QHBoxLayout()
+        if not self._is_viewer:
+            for label, slot, obj in [
+                ("✅ Mark Paid", self._reg_mark_paid, ""),
+                ("⬜ Mark Unpaid", self._reg_mark_unpaid, "secondaryBtn"),
+                ("🧾 Create Receipt", self._reg_create_receipt, ""),
+            ]:
+                btn = QPushButton(label)
+                if obj:
+                    btn.setObjectName(obj)
+                btn.clicked.connect(slot)
+                toolbar.addWidget(btn)
+        toolbar.addStretch()
+        layout.addLayout(toolbar)
+
+        # Tree — flat (no student grouping needed; simpler table-like view)
+        self._reg_tree = QTreeWidget()
+        self._reg_tree.setColumnCount(6)
+        self._reg_tree.setHeaderLabels(
+            ["✓", "Student", "Admission No", "Sport", "Amount", "Status"]
+        )
+        self._reg_tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self._reg_tree.setColumnWidth(0, 30)
+        self._reg_tree.setColumnWidth(2, 110)
+        self._reg_tree.setColumnWidth(3, 130)
+        self._reg_tree.setColumnWidth(4, 90)
+        self._reg_tree.setColumnWidth(5, 80)
+        self._reg_tree.setAlternatingRowColors(True)
+        self._reg_tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._reg_tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self._reg_tree.setRootIsDecorated(False)
+        if not self._is_viewer:
+            self._reg_tree.itemClicked.connect(self._on_reg_item_clicked)
+        layout.addWidget(self._reg_tree)
+
+        return w
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Public API
+    # ═══════════════════════════════════════════════════════════════════════
+
+    def refresh(self) -> None:
+        self._load()
+        self._load_registrations()
+
+    def _auto_generate_on_startup(self) -> None:
+        """
+        Called once via QTimer.singleShot(0) after the UI is rendered.
+        Silently backfills monthly slips from each student's join date through
+        the current month, plus any missing registration fees — no popups,
+        no user action required.
+        """
+        try:
+            self._svc.purge_pre_join_monthly()
+        except Exception as e:
+            logger.error(f"Startup purge pre-join payments: {e}")
+        try:
+            self._svc.backfill_monthly_all()
+        except Exception as e:
+            logger.error(f"Startup backfill monthly: {e}")
+        try:
+            self._svc.backfill_registrations()
+        except Exception as e:
+            logger.error(f"Startup auto-backfill registrations: {e}")
+        # Now do the initial data load so the page shows fresh data
+        self._load()
+        self._load_registrations()
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Monthly tab logic
+    # ═══════════════════════════════════════════════════════════════════════
+
+    def _load(self) -> None:
+        month = self._month_combo.currentIndex() + 1
+        year = self._year_spin.value()
+        status_f = self._status_filter.currentText()
+        sport_id = self._sport_filter.currentData() or 0
+        try:
+            # ── Auto-generate: silently create any missing payment records ──
+            # generate_monthly() is idempotent — it skips students who already
+            # have a record for this month/year, so calling it on every load is safe.
+            new_count = self._svc.generate_monthly(month, year)
+            if new_count:
+                self._autogen_lbl.setText(
+                    f"\u2714 {new_count} new record{'s' if new_count != 1 else ''} generated"
+                )
+                self._autogen_lbl.setVisible(True)
+                QTimer.singleShot(4000, lambda: self._autogen_lbl.setVisible(False))
+            # ────────────────────────────────────────────────────────────────
+            rows = self._svc.get_by_month(month, year)
+            if status_f != "All":
+                rows = [r for r in rows if r["payment"].payment_status == status_f.lower()]
+            if sport_id:
+                rows = [r for r in rows if r["payment"].sport_id == sport_id]
+            self._all_rows = rows
+            self._apply_search()
+            stats = self._svc.monthly_stats(month, year)
+            self._stats_lbl.setText(
+                f"  Income: {stats['income']:.2f}  |  Unpaid: {stats['unpaid_count']}"
+            )
+        except Exception as e:
+            logger.error(f"Payments load: {e}")
+
+    def _apply_search(self) -> None:
+        query = self._search.text().strip().lower()
+        if query:
+            rows = [
+                r for r in self._all_rows
+                if query in r["student_name"].lower()
+                or query in r["admission_no"].lower()
+            ]
+        else:
+            rows = self._all_rows
+        self._populate(rows)
+
+    def _populate(self, rows: list[dict]) -> None:
+        self._tree.blockSignals(True)
+        self._tree.clear()
+
+        groups: dict[int, list[dict]] = {}
+        order: list[int] = []
+        for r in rows:
+            sid = r["payment"].student_id
+            if sid not in groups:
+                groups[sid] = []
+                order.append(sid)
+            groups[sid].append(r)
+
+        today = date.today()
+        red = QBrush(QColor("#e74c3c"))
+
+        for sid in order:
+            student_rows = groups[sid]
+            first = student_rows[0]
+            paid_count = sum(1 for r in student_rows if r["payment"].payment_status == "paid")
+            total = sum(r["payment"].amount for r in student_rows)
+
+            parent = QTreeWidgetItem(self._tree)
+            parent.setFlags(parent.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
+            parent.setText(_COL_SPORT,
+                f"{first['student_name']}  —  Adm: {first['admission_no']}")
+            parent.setText(_COL_AMOUNT, f"{total:.2f}")
+            parent.setText(_COL_STATUS, f"{paid_count}/{len(student_rows)} paid")
+            parent.setData(_COL_SPORT, Qt.ItemDataRole.UserRole, sid)
+            font = parent.font(_COL_SPORT)
+            font.setBold(True)
+            for col in range(self._tree.columnCount()):
+                parent.setFont(col, font)
+            parent.setExpanded(True)
+
+            for r in student_rows:
+                p = r["payment"]
+                is_overdue = (
+                    p.payment_status == "unpaid" and (
+                        p.payment_year < today.year or
+                        (p.payment_year == today.year and p.payment_month < today.month)
+                    )
+                )
+                child = QTreeWidgetItem(parent)
+                if not self._is_viewer:
+                    child.setCheckState(_COL_CHECK, Qt.CheckState.Unchecked)
+                child.setText(_COL_SPORT, r["sport_name"])
+                child.setText(_COL_AMOUNT, f"{p.amount:.2f}")
+                child.setText(_COL_STATUS, p.payment_status.capitalize())
+                child.setText(_COL_DATE, p.payment_date or "—")
+                child.setData(_COL_SPORT, Qt.ItemDataRole.UserRole, p.id)
+                if is_overdue:
+                    for col in range(1, self._tree.columnCount()):
+                        child.setForeground(col, red)
+
+        self._tree.blockSignals(False)
+
+    def _on_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
+        if item.parent() is None:
+            child_states = [
+                item.child(i).checkState(_COL_CHECK)
+                for i in range(item.childCount())
+            ]
+            new_state = (
+                Qt.CheckState.Unchecked
+                if all(s == Qt.CheckState.Checked for s in child_states)
+                else Qt.CheckState.Checked
+            )
+            for i in range(item.childCount()):
+                item.child(i).setCheckState(_COL_CHECK, new_state)
+        elif column != _COL_CHECK:
+            current = item.checkState(_COL_CHECK)
+            item.setCheckState(
+                _COL_CHECK,
+                Qt.CheckState.Unchecked
+                if current == Qt.CheckState.Checked
+                else Qt.CheckState.Checked,
+            )
+
+    def _checked_ids(self) -> list[int]:
+        ids = []
+        root = self._tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            parent = root.child(i)
+            for j in range(parent.childCount()):
+                child = parent.child(j)
+                if child.checkState(_COL_CHECK) == Qt.CheckState.Checked:
+                    ids.append(child.data(_COL_SPORT, Qt.ItemDataRole.UserRole))
+        return ids
+
+    def _generate(self) -> None:
+        month = self._month_combo.currentIndex() + 1
+        year = self._year_spin.value()
+        try:
+            count = self._svc.generate_monthly(month, year)
+            QMessageBox.information(self, "Done", f"Generated {count} new payment records.")
+            self._load()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+
+    def _mark_paid(self) -> None:
+        ids = self._checked_ids()
+        if not ids:
+            QMessageBox.information(self, "Select", "Check payments to mark as paid.")
+            return
+        try:
+            self._svc.mark_paid(ids)
+            self._load()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+
+    def _mark_unpaid(self) -> None:
+        ids = self._checked_ids()
+        if not ids:
+            QMessageBox.information(self, "Select", "Check payments to mark as unpaid.")
+            return
+        reply = QMessageBox.question(
+            self, "Confirm",
+            f"Mark {len(ids)} payment(s) as unpaid? This will also unlink any receipts.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self._svc.mark_unpaid(ids)
+            self._load()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+
+    def _create_receipt(self) -> None:
+        self._do_create_receipt(
+            checked_ids=self._checked_ids(),
+            all_rows=self._all_rows,
+            reload_fn=self._load,
+        )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Registration tab logic
+    # ═══════════════════════════════════════════════════════════════════════
+
+    def _load_registrations(self) -> None:
+        status_f = self._reg_status_filter.currentText()
+        try:
+            # Auto-backfill any missing registration fee records silently.
+            self._svc.backfill_registrations()
+            self._reg_rows = self._svc.get_registrations(status_f)
+            self._apply_reg_search()
+        except Exception as e:
+            logger.error(f"Registration load: {e}")
+
+    def _apply_reg_search(self) -> None:
+        query = self._reg_search.text().strip().lower()
+        if query:
+            rows = [
+                r for r in self._reg_rows
+                if query in r["student_name"].lower()
+                or query in r["admission_no"].lower()
+            ]
+        else:
+            rows = self._reg_rows
+        self._populate_reg(rows)
+
+    def _populate_reg(self, rows: list[dict]) -> None:
+        self._reg_tree.blockSignals(True)
+        self._reg_tree.clear()
+        green = QBrush(QColor("#27ae60"))
+        red = QBrush(QColor("#e74c3c"))
+
+        for r in rows:
+            p = r["payment"]
+            item = QTreeWidgetItem(self._reg_tree)
+            if not self._is_viewer:
+                item.setCheckState(0, Qt.CheckState.Unchecked)
+            item.setText(1, r["student_name"])
+            item.setText(2, r["admission_no"])
+            item.setText(3, r["sport_name"])
+            item.setText(4, f"{p.amount:.2f}")
+            item.setText(5, p.payment_status.capitalize())
+            item.setData(0, Qt.ItemDataRole.UserRole, p.id)
+            colour = green if p.payment_status == "paid" else red
+            for col in range(1, 6):
+                item.setForeground(col, colour)
+
+        self._reg_tree.blockSignals(False)
+
+    def _on_reg_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
+        if column != 0:
+            current = item.checkState(0)
+            item.setCheckState(
+                0,
+                Qt.CheckState.Unchecked
+                if current == Qt.CheckState.Checked
+                else Qt.CheckState.Checked,
+            )
+
+    def _reg_checked_ids(self) -> list[int]:
+        ids = []
+        root = self._reg_tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            child = root.child(i)
+            if child.checkState(0) == Qt.CheckState.Checked:
+                ids.append(child.data(0, Qt.ItemDataRole.UserRole))
+        return ids
+
+    def _reg_mark_paid(self) -> None:
+        ids = self._reg_checked_ids()
+        if not ids:
+            QMessageBox.information(self, "Select", "Check registration fees to mark as paid.")
+            return
+        try:
+            self._svc.mark_paid(ids)
+            self._load_registrations()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+
+    def _reg_mark_unpaid(self) -> None:
+        ids = self._reg_checked_ids()
+        if not ids:
+            QMessageBox.information(self, "Select", "Check registration fees to mark as unpaid.")
+            return
+        reply = QMessageBox.question(
+            self, "Confirm",
+            f"Mark {len(ids)} registration fee(s) as unpaid? This will also unlink any receipts.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self._svc.mark_unpaid(ids)
+            self._load_registrations()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+
+    def _reg_create_receipt(self) -> None:
+        self._do_create_receipt(
+            checked_ids=self._reg_checked_ids(),
+            all_rows=self._reg_rows,
+            reload_fn=self._load_registrations,
+        )
+
+    def _backfill_registration_fees(self) -> None:
+        reply = QMessageBox.question(
+            self, "Generate Missing Registration Fees",
+            "This will create registration fee records for all active enrolments "
+            "that don't have one yet.\n\nContinue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            created = self._svc.backfill_registrations()
+            QMessageBox.information(self, "Done",
+                f"Created {created} missing registration fee record(s).")
+            self._load_registrations()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Shared receipt creation helper
+    # ═══════════════════════════════════════════════════════════════════════
+
+    def _do_create_receipt(
+        self,
+        checked_ids: list[int],
+        all_rows: list[dict],
+        reload_fn,
+    ) -> None:
+        if not checked_ids:
+            QMessageBox.information(self, "Select", "Check payments to include in receipt.")
+            return
+        ids_set = set(checked_ids)
+        payment_rows = [r for r in all_rows if r["payment"].id in ids_set]
+        if not payment_rows:
+            QMessageBox.warning(self, "Reload Required",
+                "Could not find selected payments. Please reload and try again.")
+            return
+        student_ids = {r["payment"].student_id for r in payment_rows}
+        if len(student_ids) > 1:
+            QMessageBox.warning(self, "Multiple Students",
+                "All selected payments must be for the same student.")
+            return
+        already = [r for r in payment_rows if r["payment"].receipt_id is not None]
+        if already:
+            sports = ", ".join(r["sport_name"] for r in already)
+            QMessageBox.warning(self, "Already Receipted",
+                f"These payments already have a receipt:\n{sports}\n\n"
+                "Deselect them or mark them unpaid first.")
+            return
+        student_id = next(iter(student_ids))
+        dlg = ReceiptMethodDialog(parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            method = dlg.get_method()
+            try:
+                receipt = self._receipt_svc.create(student_id, checked_ids, method)
+                QMessageBox.information(self, "Receipt Created",
+                    f"Receipt {receipt.receipt_no} created successfully.")
+                reload_fn()
+            except Exception as e:
+                QMessageBox.critical(self, "Error", str(e))
+
+
+_METHOD_LABELS = {"Cash": "cash", "Card": "card", "Bank Transfer": "bank"}
+
+
+class ReceiptMethodDialog(QDialog):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Create Receipt")
+        self.setModal(True)
+        self.setMinimumWidth(300)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
+        layout.addWidget(QLabel("Select the payment method for this receipt:"))
+        self._combo = QComboBox()
+        self._combo.addItems(list(_METHOD_LABELS.keys()))
+        layout.addWidget(self._combo)
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def get_method(self) -> str:
+        return _METHOD_LABELS[self._combo.currentText()]
