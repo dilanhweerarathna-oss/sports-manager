@@ -23,6 +23,7 @@ _NAV_ITEMS = [
     ("reports",      "📊", "Reports"),
     ("settings",     "⚙️",  "Settings"),
     ("activity_log", "📋", "Activity Log"),
+    ("help",         "❓", "Help"),
 ]
 
 
@@ -162,6 +163,7 @@ class MainWindow(QMainWindow):
         from ui.pages.attendance_page import AttendancePage
         from ui.pages.reports_page import ReportsPage
         from ui.pages.activity_log_page import ActivityLogPage
+        from ui.pages.help_page import HelpPage
 
         page_classes = {
             "dashboard":    DashboardPage,
@@ -174,6 +176,7 @@ class MainWindow(QMainWindow):
             "attendance":   AttendancePage,
             "reports":      ReportsPage,
             "activity_log": ActivityLogPage,
+            "help":         HelpPage,
         }
         # Settings is admin-only — never instantiated for viewers
         if not self._is_viewer:
