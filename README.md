@@ -61,6 +61,7 @@ Sports Manager is an offline-first Windows desktop app that helps schools run th
 ├── cloud/                   # Supabase schema (one project per school)
 ├── mobile/                  # React PWA (coach attendance)
 └── README_BUILD.md          # Detailed build & installer instructions
+SportsManager.exe            # Fulliy Build Ready to Run single file. 
 ```
 
 ---
