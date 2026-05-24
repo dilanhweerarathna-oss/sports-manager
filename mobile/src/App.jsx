@@ -4,12 +4,13 @@ import { useEffect, useState } from 'react';
 import { hasConfig } from './lib/config.js';
 import { getSupabase } from './lib/supabase.js';
 
-import SetupPage          from './pages/SetupPage.jsx';
-import NotConfiguredPage  from './pages/NotConfiguredPage.jsx';
-import LoginPage          from './pages/LoginPage.jsx';
-import SportsListPage     from './pages/SportsListPage.jsx';
-import SessionsListPage   from './pages/SessionsListPage.jsx';
-import MarkAttendancePage from './pages/MarkAttendancePage.jsx';
+import SetupPage           from './pages/SetupPage.jsx';
+import NotConfiguredPage   from './pages/NotConfiguredPage.jsx';
+import LoginPage           from './pages/LoginPage.jsx';
+import SportsListPage      from './pages/SportsListPage.jsx';
+import SessionsListPage    from './pages/SessionsListPage.jsx';
+import MarkAttendancePage  from './pages/MarkAttendancePage.jsx';
+import ChangePasswordPage  from './pages/ChangePasswordPage.jsx';
 
 export default function App() {
   return (
@@ -22,6 +23,7 @@ export default function App() {
         <Route path="/sports"               element={<RequireAuth><SportsListPage /></RequireAuth>} />
         <Route path="/sport/:sportId"       element={<RequireAuth><SessionsListPage /></RequireAuth>} />
         <Route path="/session/:sessionId"   element={<RequireAuth><MarkAttendancePage /></RequireAuth>} />
+        <Route path="/change-password"      element={<RequireAuth><ChangePasswordPage /></RequireAuth>} />
 
         <Route path="/" element={<Landing />} />
         <Route path="*" element={<Navigate to="/" replace />} />

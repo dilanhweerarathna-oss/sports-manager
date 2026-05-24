@@ -38,6 +38,30 @@ export async function changePassword(newPassword) {
   if (error) throw error;
 }
 
+/** Verify the current password by re-signing-in, then set a new one.
+ *  Supabase has no dedicated "verify password" endpoint, so we attempt
+ *  signInWithPassword first — on success it refreshes the JWT for the
+ *  same user, which is harmless. */
+export async function reauthenticateAndChangePassword(currentPassword, newPassword) {
+  const sb = getSupabase();
+  if (!sb) throw new Error('App not configured.');
+
+  const { data: userData } = await sb.auth.getUser();
+  const email = userData?.user?.email;
+  if (!email) throw new Error('Not signed in.');
+
+  const { error: reauthErr } = await sb.auth.signInWithPassword({ email, password: currentPassword });
+  if (reauthErr) {
+    if (/Invalid login credentials/i.test(reauthErr.message || '')) {
+      throw new Error('Current password is incorrect.');
+    }
+    throw reauthErr;
+  }
+
+  const { error: updErr } = await sb.auth.updateUser({ password: newPassword });
+  if (updErr) throw updErr;
+}
+
 /** Sports the signed-in user is allowed to see + mark. */
 export async function getMySports() {
   const sb = getSupabase();

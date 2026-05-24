@@ -58,6 +58,11 @@ export default function SportsListPage() {
           <div className="subtitle">Tap a sport to mark attendance</div>
         </div>
         {ctx?.role && <span className="role-chip">{ctx.role.toUpperCase()}</span>}
+        <button
+          className="icon-btn"
+          onClick={() => navigate('/change-password')}
+          title="Change password"
+        >🔑</button>
         <button className="icon-btn" onClick={handleSignOut} title="Sign out">↪</button>
       </div>
 
