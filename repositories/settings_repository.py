@@ -31,11 +31,13 @@ class SettingsRepository(BaseRepository[Settings]):
             """UPDATE settings SET
                school_name=?, address=?, logo_path=?, receipt_prefix=?,
                backup_path=?, theme_mode=?,
-               auto_upgrade_enabled=?, last_upgrade_year=?
+               auto_upgrade_enabled=?, last_upgrade_year=?,
+               card_hmac_secret=?, phone=?
                WHERE id=1""",
             (s.school_name, s.address, s.logo_path, s.receipt_prefix,
              s.backup_path, s.theme_mode,
-             1 if s.auto_upgrade_enabled else 0, s.last_upgrade_year),
+             1 if s.auto_upgrade_enabled else 0, s.last_upgrade_year,
+             s.card_hmac_secret, s.phone),
         )
         self.conn.commit()
         return self.get()

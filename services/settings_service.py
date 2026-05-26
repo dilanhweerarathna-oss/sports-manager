@@ -25,6 +25,7 @@ class SettingsService:
         s = self._repo.get()
         s.school_name    = data.get("school_name",    s.school_name).strip() or s.school_name
         s.address        = data.get("address",        s.address)
+        s.phone          = data.get("phone",          s.phone) or None
         s.receipt_prefix = data.get("receipt_prefix", s.receipt_prefix).strip() or "REC"
         s.logo_path      = data.get("logo_path",      s.logo_path) or None
         s.backup_path    = data.get("backup_path",    s.backup_path) or None

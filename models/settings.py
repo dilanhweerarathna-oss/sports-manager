@@ -15,6 +15,8 @@ class Settings:
     theme_mode: str = "dark"
     auto_upgrade_enabled: bool = True
     last_upgrade_year: Optional[int] = None
+    card_hmac_secret: Optional[str] = None
+    phone: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Settings:

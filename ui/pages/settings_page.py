@@ -111,6 +111,8 @@ class SettingsPage(QWidget):
 
         self._school_name = QLineEdit()
         self._address = QLineEdit()
+        self._phone = QLineEdit()
+        self._phone.setPlaceholderText("School office phone (printed on card back)")
         self._receipt_prefix = QLineEdit()
         self._receipt_prefix.setMaximumWidth(120)
 
@@ -146,6 +148,7 @@ class SettingsPage(QWidget):
 
         form.addRow("School Name:", self._school_name)
         form.addRow("Address:", self._address)
+        form.addRow("Phone:", self._phone)
         form.addRow("Receipt Prefix:", self._receipt_prefix)
         form.addRow("Logo:", logo_row)
         form.addRow("Backup Folder:", backup_row)
@@ -165,9 +168,65 @@ class SettingsPage(QWidget):
         btn_row.addStretch()
         layout.addLayout(btn_row)
 
+        # ── Membership Cards section (admin-only) ─────────────────────────
+        if not self._auth.is_viewer:
+            cards_section = QFrame()
+            cards_section.setObjectName("statCard")
+            cards_layout = QVBoxLayout(cards_section)
+            cards_layout.setContentsMargins(24, 16, 24, 16)
+            cards_layout.setSpacing(8)
+
+            cards_title = QLabel("Membership Cards")
+            cards_title.setStyleSheet("font-size: 14px; font-weight: 700;")
+            cards_layout.addWidget(cards_title)
+
+            cards_desc = QLabel(
+                "Rotating the card secret invalidates every printed membership "
+                "card. Students must be issued new cards afterwards."
+            )
+            cards_desc.setWordWrap(True)
+            cards_desc.setStyleSheet("color: gray; font-size: 11px;")
+            cards_layout.addWidget(cards_desc)
+
+            rotate_btn = QPushButton("🔄 Rotate Card Secret")
+            rotate_btn.setObjectName("dangerBtn")
+            rotate_btn.clicked.connect(self._rotate_card_secret)
+            cards_layout.addWidget(rotate_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+
+            layout.addWidget(cards_section)
+
         outer.addWidget(card, alignment=Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         outer.addStretch()
         return wrap
+
+    def _rotate_card_secret(self) -> None:
+        """Admin-only. Confirms then rotates settings.card_hmac_secret. After
+        the next sync, every printed card will fail to scan; cards must be
+        reprinted."""
+        if QMessageBox.question(
+            self,
+            "Rotate Card Secret",
+            "This will invalidate every printed membership card.\n\n"
+            "After the next cloud sync, scanning an old card will fail. "
+            "You will need to reprint cards for every active student.\n\n"
+            "Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            from services.membership_card_service import MembershipCardService
+            MembershipCardService().rotate_secret()
+        except Exception as e:
+            logger.exception("Card secret rotation failed")
+            QMessageBox.critical(self, "Rotation failed", str(e))
+            return
+        QMessageBox.information(
+            self,
+            "Card secret rotated",
+            "A new card secret has been generated.\n"
+            "Trigger a cloud sync to push the new tokens, then reprint cards.",
+        )
 
     # ── Users management tab ─────────────────────────────────────────────────
     def _build_users_tab(self) -> QWidget:
@@ -308,6 +367,7 @@ class SettingsPage(QWidget):
             s = self._svc.get()
             self._school_name.setText(s.school_name or "")
             self._address.setText(s.address or "")
+            self._phone.setText(s.phone or "")
             self._receipt_prefix.setText(s.receipt_prefix or "REC")
             self._logo_path.setText(s.logo_path or "")
             self._backup_path.setText(s.backup_path or "")
@@ -327,6 +387,7 @@ class SettingsPage(QWidget):
         data = {
             "school_name": self._school_name.text().strip(),
             "address": self._address.text().strip(),
+            "phone": self._phone.text().strip(),
             "receipt_prefix": self._receipt_prefix.text().strip(),
             "logo_path": self._logo_path.text().strip(),
             "backup_path": self._backup_path.text().strip(),

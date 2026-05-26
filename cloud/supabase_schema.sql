@@ -37,6 +37,12 @@ CREATE TABLE IF NOT EXISTS student_ref (
   synced_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- card_token: the QR payload printed on the student's membership card.
+-- HMAC-derived on desktop, looked up by mobile via equality match. The HMAC
+-- secret itself stays on desktop; only the per-student derived token is here.
+ALTER TABLE student_ref ADD COLUMN IF NOT EXISTS card_token TEXT;
+CREATE INDEX IF NOT EXISTS ix_student_ref_card_token ON student_ref(card_token);
+
 CREATE TABLE IF NOT EXISTS sport_ref (
   sport_id      INT PRIMARY KEY,
   sport_name    TEXT NOT NULL,

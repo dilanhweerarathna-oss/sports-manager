@@ -11,6 +11,8 @@ After this completes, the admin should restart the app so CloudSyncService
 picks up the new keys. (We could hot-reload but a restart is cleaner.)
 """
 from __future__ import annotations
+import re
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -28,6 +30,13 @@ from utils.logger import get_logger
 logger = get_logger("cloud_setup")
 
 
+def _schema_sql_path() -> Path:
+    """Resolve cloud/supabase_schema.sql in both dev and PyInstaller-frozen modes."""
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS) / "cloud" / "supabase_schema.sql"
+    return Path(__file__).resolve().parents[2] / "cloud" / "supabase_schema.sql"
+
+
 _INSTRUCTIONS = """\
 1. Click "Open supabase.com" — sign in (free Google sign-in works).
 2. Click "New project". Pick any name (e.g. your school name) and password.
@@ -38,8 +47,9 @@ _INSTRUCTIONS = """\
      • service_role key  (the SECRET one — bottom of the page)
      • anon (public) key
 
-5. (After this wizard) Open the SQL Editor → New query → paste the contents
-   of cloud/supabase_schema.sql → Run.
+5. Click "📋 Copy schema SQL & open SQL Editor" below — it copies the
+   schema to your clipboard and opens the SQL Editor in your browser.
+   Paste (Ctrl+V) → click Run.
 """
 
 
@@ -70,7 +80,7 @@ class CloudSetupDialog(QDialog):
         # Instructions card
         instr = QPlainTextEdit(_INSTRUCTIONS)
         instr.setReadOnly(True)
-        instr.setMaximumHeight(170)
+        instr.setMaximumHeight(195)
         instr.setStyleSheet("font-size: 12px; padding: 8px;")
         layout.addWidget(instr)
 
@@ -80,7 +90,13 @@ class CloudSetupDialog(QDialog):
         open_btn.clicked.connect(lambda: QDesktopServices.openUrl(
             QUrl("https://supabase.com/dashboard")
         ))
-        row = QHBoxLayout(); row.addWidget(open_btn); row.addStretch()
+        copy_sql_btn = QPushButton("📋 Copy schema SQL & open SQL Editor")
+        copy_sql_btn.setObjectName("secondaryBtn")
+        copy_sql_btn.clicked.connect(self._do_copy_schema)
+        row = QHBoxLayout()
+        row.addWidget(open_btn)
+        row.addWidget(copy_sql_btn)
+        row.addStretch()
         layout.addLayout(row)
 
         # Fields
@@ -146,6 +162,37 @@ class CloudSetupDialog(QDialog):
         if not anon.startswith("eyJ") and not anon.startswith("sb"):
             return "Anon key looks wrong — paste it from Project Settings → API."
         return None
+
+    def _do_copy_schema(self) -> None:
+        schema_path = _schema_sql_path()
+        try:
+            sql_text = schema_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            self._set_status(
+                f"Couldn't find schema file at {schema_path}. "
+                "Reinstall the app or copy cloud/supabase_schema.sql manually.",
+                error=True,
+            )
+            return
+        except OSError as e:
+            self._set_status(f"Couldn't read schema file: {e}", error=True)
+            return
+
+        QApplication.clipboard().setText(sql_text)
+
+        url = self._url.text().strip()
+        m = re.match(r"^https://([a-z0-9]+)\.supabase\.co/?$", url)
+        if m:
+            target = f"https://supabase.com/dashboard/project/{m.group(1)}/sql/new"
+        else:
+            target = "https://supabase.com/dashboard"
+        QDesktopServices.openUrl(QUrl(target))
+
+        self._set_status(
+            "✓ Schema copied to clipboard. Paste it (Ctrl+V) in the SQL Editor "
+            "tab that just opened, then click Run.",
+            error=False,
+        )
 
     def _do_test(self) -> None:
         err = self._validate()
@@ -218,8 +265,9 @@ class CloudSetupDialog(QDialog):
             self, "Saved",
             f"Saved to:\n{env_path}\n\n"
             "Restart Sports Manager for the cloud sync to start.\n\n"
-            "Next steps: in Supabase Studio, open SQL Editor → New query → "
-            "paste the contents of cloud/supabase_schema.sql → Run."
+            "If you haven't already run the schema in Supabase, click "
+            "\"📋 Copy schema SQL & open SQL Editor\" in this wizard "
+            "before closing it."
         )
         self.accept()
 

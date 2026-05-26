@@ -18,6 +18,7 @@ PROJECT_ROOT = Path(SPECPATH)
 datas = [
     ('database/schema.sql',                       'database'),
     ('database/migration_001_add_payment_type.py', 'database'),
+    ('cloud/supabase_schema.sql',                 'cloud'),
 ]
 
 # Ship the assets folder only if it has any files in it

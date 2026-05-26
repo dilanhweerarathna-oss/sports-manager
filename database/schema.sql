@@ -253,3 +253,12 @@ AFTER UPDATE ON students
 BEGIN
     UPDATE students SET updated_at = datetime('now') WHERE id = NEW.id;
 END;
+
+-- ─── Membership-card columns on settings (Migration 004) ─────────────────────
+-- card_hmac_secret: desktop-only HMAC secret for QR membership cards (NULL
+-- until the first card is printed; auto-populated then).
+-- phone: school office phone, rendered on the back of the card.
+-- Idempotent: the connection bootstrap in database/connection.py swallows the
+-- OperationalError these ALTERs throw on second run.
+ALTER TABLE settings ADD COLUMN card_hmac_secret TEXT;
+ALTER TABLE settings ADD COLUMN phone TEXT;

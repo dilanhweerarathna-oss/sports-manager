@@ -323,6 +323,19 @@ class AttendancePage(QWidget):
         self._scan_field.setEnabled(not self._is_viewer)
         self._scan_field.returnPressed.connect(self._on_scan_enter)
         scan_row.addWidget(self._scan_field, 1)
+
+        # Camera scan button — opens a modal webcam dialog and funnels the
+        # decoded admission_no back through the existing _on_scan_enter flow.
+        self._camera_btn = QPushButton("📷")
+        self._camera_btn.setToolTip("Open camera and scan a membership card")
+        self._camera_btn.setFixedHeight(34)
+        self._camera_btn.setFixedWidth(40)
+        self._camera_btn.setEnabled(not self._is_viewer)
+        self._camera_btn.clicked.connect(self._open_camera_scanner)
+        if self._is_viewer:
+            self._camera_btn.hide()
+        scan_row.addWidget(self._camera_btn)
+
         self._scan_msg = QLabel("")
         self._scan_msg.setStyleSheet("color: #6b7280; font-size: 11px;")
         self._scan_msg.setMinimumWidth(240)
@@ -668,6 +681,33 @@ class AttendancePage(QWidget):
                 break
 
     # ── QR scan handler ──────────────────────────────────────────────────────
+
+    def _open_camera_scanner(self) -> None:
+        """Open the webcam dialog. On success, funnel the decoded
+        admission_no into _on_scan_enter so the existing mark/flash/counts
+        flow handles it."""
+        if self._current_session_id is None:
+            self._show_scan_msg("Select or create a session first.", error=True)
+            return
+        if self._session_is_closed:
+            self._show_scan_msg("Session is closed — reopen to mark.", error=True)
+            return
+
+        # Import lazily so missing cv2 doesn't kill the whole Attendance page.
+        try:
+            from ui.dialogs.qr_scan_dialog import QrScanDialog
+        except ImportError as e:
+            self._show_scan_msg(
+                "Camera scan needs opencv-python-headless. "
+                "Run: pip install opencv-python-headless",
+                error=True,
+            )
+            return
+
+        dlg = QrScanDialog(self)
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.scanned_admission_no:
+            self._scan_field.setText(dlg.scanned_admission_no)
+            self._on_scan_enter()
 
     def _on_scan_enter(self) -> None:
         query = self._scan_field.text().strip()

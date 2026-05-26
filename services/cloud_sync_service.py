@@ -498,6 +498,16 @@ class CloudSyncService:
             for r in conn.execute(spec["local_sql"]).fetchall()
         ]
 
+        # student_ref carries an extra HMAC-derived QR token used by the
+        # mobile app to identify a scanned membership card. The token is a
+        # pure function of (secret, admission_no) so it's computed at push
+        # time rather than stored as a column.
+        if spec["name"] == "student_ref" and local_rows:
+            from services.membership_card_service import MembershipCardService
+            card_svc = MembershipCardService()
+            for row in local_rows:
+                row["card_token"] = card_svc.build_payload(row["admission_no"])
+
         # Step 1: upsert (no-op on empty list).
         if local_rows:
             self._cloud_call(

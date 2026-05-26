@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QDialog, QDialogButtonBox, QFormLayout, QLineEdit,
     QComboBox, QTextEdit, QLabel, QCheckBox, QDateEdit,
     QTabWidget, QMessageBox, QAbstractItemView, QFrame,
-    QFileDialog,
+    QFileDialog, QMenu,
 )
 from PySide6.QtCore import Qt, QDate
 from PySide6.QtGui import QColor
@@ -14,10 +14,12 @@ from ui.widgets.search_bar import SearchBar
 from ui.widgets.status_badge import StatusBadge
 from ui.widgets.confirm_dialog import ConfirmDialog
 from ui.widgets.form_field import FormField
+from ui.dialogs.card_preview_dialog import CardPreviewDialog, _open_in_os_viewer
 from services.student_service import StudentService
 from services.sport_service import SportService
 from services.payment_service import PaymentService
 from services.auth_service import AuthService
+from services.membership_card_service import MembershipCardService
 from utils.exceptions import ValidationError
 from utils.logger import get_logger
 
@@ -68,6 +70,20 @@ class StudentsPage(QWidget):
             btn.clicked.connect(slot)
             toolbar.addWidget(btn)
 
+        # Print Cards dropdown — always visible (printing isn't a write op).
+        self._cards_btn = QPushButton("🪪 Print Cards ▾")
+        self._cards_btn.setObjectName("secondaryBtn")
+        self._cards_menu = QMenu(self._cards_btn)
+        self._cards_menu.addAction("Print Card (PVC)",                self._print_card_pvc)
+        self._cards_menu.addAction("Print Cards for Selected (PVC)",  self._print_selected_pvc)
+        self._cards_menu.addAction("Print Cards for All Active (PVC)", self._print_all_active_pvc)
+        self._cards_menu.addSeparator()
+        a4_menu = self._cards_menu.addMenu("Print as A4 paper sheet")
+        a4_menu.addAction("Selected",   self._print_selected_a4)
+        a4_menu.addAction("All Active", self._print_all_active_a4)
+        self._cards_btn.setMenu(self._cards_menu)
+        toolbar.addWidget(self._cards_btn)
+
         layout.addLayout(toolbar)
 
         # ── Table ─────────────────────────────────────────────────────────────
@@ -78,6 +94,9 @@ class StudentsPage(QWidget):
         ])
         self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        # ExtendedSelection lets the admin Ctrl/Shift-click multiple students
+        # for batch card printing while still supporting single-row Add/Edit/Delete.
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setAlternatingRowColors(True)
         self._table.verticalHeader().setVisible(False)
@@ -122,6 +141,122 @@ class StudentsPage(QWidget):
             return None
         item = self._table.item(row, 0)
         return int(item.text()) if item else None
+
+    def _selected_ids(self) -> list[int]:
+        """All currently-selected student IDs, in row order."""
+        rows = sorted({idx.row() for idx in self._table.selectedIndexes()})
+        out: list[int] = []
+        for row in rows:
+            item = self._table.item(row, 0)
+            if item is not None:
+                try:
+                    out.append(int(item.text()))
+                except ValueError:
+                    pass
+        return out
+
+    # ── Card printing ────────────────────────────────────────────────────────
+    def _print_card_pvc(self) -> None:
+        """Single-student preview dialog with Save & Open."""
+        ids = self._selected_ids()
+        if len(ids) != 1:
+            QMessageBox.information(
+                self, "Print Card",
+                "Select exactly one student for the single-card preview, "
+                "or use 'Print Cards for Selected (PVC)' for a batch."
+            )
+            return
+        try:
+            student = self._svc.get_by_id(ids[0])
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+            return
+        dlg = CardPreviewDialog(student, parent=self)
+        dlg.exec()
+
+    def _print_selected_pvc(self) -> None:
+        self._batch_pvc(self._selected_ids(), "Selected")
+
+    def _print_all_active_pvc(self) -> None:
+        svc = MembershipCardService()
+        n = svc.count_active_students()
+        if n == 0:
+            QMessageBox.information(self, "Print Cards", "No active students.")
+            return
+        if not self._confirm_batch(n, "all active", "PVC"):
+            return
+        try:
+            out = svc.export_all_active_pvc_pdf(double_sided=True)
+        except Exception as e:
+            logger.exception("All-active PVC export failed")
+            QMessageBox.critical(self, "Error", str(e))
+            return
+        _open_in_os_viewer(out)
+
+    def _print_selected_a4(self) -> None:
+        self._batch_a4(self._selected_ids(), "Selected")
+
+    def _print_all_active_a4(self) -> None:
+        svc = MembershipCardService()
+        n = svc.count_active_students()
+        if n == 0:
+            QMessageBox.information(self, "Print Cards", "No active students.")
+            return
+        if not self._confirm_batch(n, "all active", "A4"):
+            return
+        try:
+            out = svc.export_all_active_a4_pdf(double_sided=True)
+        except Exception as e:
+            logger.exception("All-active A4 export failed")
+            QMessageBox.critical(self, "Error", str(e))
+            return
+        _open_in_os_viewer(out)
+
+    # ── Batch helpers ────────────────────────────────────────────────────────
+    def _batch_pvc(self, ids: list[int], label: str) -> None:
+        if not ids:
+            QMessageBox.information(self, "Print Cards", "Select one or more students first.")
+            return
+        if not self._confirm_batch(len(ids), label.lower(), "PVC"):
+            return
+        svc = MembershipCardService()
+        try:
+            out = svc.export_pvc_pdf(ids, double_sided=True)
+        except Exception as e:
+            logger.exception("Selected PVC export failed")
+            QMessageBox.critical(self, "Error", str(e))
+            return
+        _open_in_os_viewer(out)
+
+    def _batch_a4(self, ids: list[int], label: str) -> None:
+        if not ids:
+            QMessageBox.information(self, "Print Cards", "Select one or more students first.")
+            return
+        if not self._confirm_batch(len(ids), label.lower(), "A4"):
+            return
+        svc = MembershipCardService()
+        try:
+            out = svc.export_a4_paper_pdf(ids, double_sided=True)
+        except Exception as e:
+            logger.exception("Selected A4 export failed")
+            QMessageBox.critical(self, "Error", str(e))
+            return
+        _open_in_os_viewer(out)
+
+    def _confirm_batch(self, count: int, who: str, mode: str) -> bool:
+        if mode == "PVC":
+            pages = count * 2
+            msg = (f"Print {count} PVC card(s) for {who} students? "
+                   f"This will generate {pages} pages (front + back interleaved).")
+        else:
+            sheets = ((count + 9) // 10) * 2
+            msg = (f"Print {count} card(s) on A4 paper for {who} students? "
+                   f"This will generate {sheets} sheet(s) "
+                   "(fronts then mirrored backs — print duplex long-edge).")
+        return QMessageBox.question(
+            self, "Print Cards", msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        ) == QMessageBox.StandardButton.Yes
 
     def _add(self) -> None:
         dlg = StudentFormDialog(parent=self)
